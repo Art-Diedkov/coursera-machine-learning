@@ -1,0 +1,208 @@
+---
+title: "‘Machine Learning Project'"
+author: "Artem"
+date: "16/12/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Executive Summary
+
+In this project we'll use publicly available data set to predict type of activity performed by participants, to be more precise we'll predict how well did they execute exercies.
+
+
+### Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). [1]
+
+### Data
+
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+
+This project consists of three parts, they are:
+
+1. Cleaning and preparing data.
+2. Partitioning data sets and fitting the models.
+3. Conluding on the results.
+
+
+## Part I
+
+### Preparing Environment and loading data
+```{r}
+# Preparing global environment
+rm(list = ls())
+# download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", method = 'curl',
+#               destfile = "train.csv")
+# download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", method = 'curl',
+#               destfile = 'test.csv')
+train <- read.csv("train.csv", stringsAsFactors = F)
+test <- read.csv("test.csv", stringsAsFactors = F)
+# creating 'classe' variable so that we can bind train and test sets for cleaning
+test$classe <- "Unknown"
+```
+
+### Getting rid of unwanted columns with a lot of missing values.
+
+Looking at data structure, we notice that there number of variables that have `char` class, but actually have numerical values. So in next round we'll trasnfrom those variables to see if there is any value for us in them.
+
+```{r, warning = F}
+# binding train and test to do data preparation and cleaning
+all_data <- rbind(train, test[, -160])
+all_data$user_name <- factor(all_data$user_name) 
+all_data$new_window <- factor(all_data$new_window)
+all_data$classe <- factor(all_data$classe)
+all_data$cvtd_timestamp <- as.Date(all_data$cvtd_timestamp, format = "%d/%m/%Y %H:%M")
+#transforming character variables to numeric
+all_data[,sapply(all_data,class) == "character"] <- apply(all_data[,sapply(all_data,class) == "character"],
+                                                    2, function(x) as.numeric(x))
+# getting rid of columns with missing values
+miss_values<- apply(all_data,2,function(x) sum(is.na(x)))
+```
+
+### Plotting missing values by columns
+
+```{r, echo = F, out.width = '120%'}
+plot(x=factor(names(miss_values)),y=miss_values, main = 'Missing values in columns', ylab = "Count of missing values",
+     las=2,cex.axis = 0.5)
+```
+
+As we can see there are quite a number of missing values in some variables, so we may remove them as probably they won't add any meaningful information.
+
+
+### Getting clean data set for further partitoning and model fitting
+
+```{r}
+to_use <- names(miss_values[-which(miss_values>0)])
+all_clean <- all_data[,to_use]
+#dropping 'unknown' level and separating data back to train and test
+all_clean <- droplevels(all_clean, exclude = 'Unknown')
+train_clean <- subset(all_clean, !is.na(classe))
+test_clean <- subset(all_clean, is.na(classe))
+```
+
+## Part II
+
+### Setting up for model fitting
+
+```{r, results=F}
+#partition train set for cross validation
+library(caret)
+inTrain <- createDataPartition(y = train_clean$classe, p = 0.7, list = F)
+training <- train_clean[inTrain,]
+testing <- train_clean[-inTrain,]
+```
+
+### First fitting `gbm` model
+
+```{r mod_gbm}
+# creating a cluster for parallel computing
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores()-1)
+registerDoParallel(cluster)
+
+#fitting gradient boosting model
+set.seed(54231)
+gbm_Control <- trainControl(method = 'repeatedcv',
+                            number = 10,
+                            repeats = 5,
+                            allowParallel = T)
+#mod_gbm <- train(classe ~., data = training, method = 'gbm', verbose = F, trControl = gbm_Control)
+#save(mod_gbm, file = 'mod_gbm.RData')
+load('mod_gbm.RData')
+gbm_pred <- predict(mod_gbm, testing)
+#Checking model performance on validation set
+confusionMatrix(gbm_pred, testing$classe)
+```
+We can see that `gbm` perfoms on a decent level with 0.991 accuracy on validation set, but this is not what I expect to proceed using this model.
+
+
+### Next we'll try to fit Support Vector Machine algorithm
+
+```{r mod_svm}
+#fitting support vector machine algo
+set.seed(9876)
+trCtrl <- trainControl(method = 'repeatedcv', number = 5, repeats = 3, allowParallel = T)
+# mod_svm <- train(classe ~., data = training, method = 'svmLinear',
+#                  trControl = trCtrl,
+#                  tuneLength = 10,
+#                  verbose = F)
+#save(mod_svm, file = 'mod_svm.RData')
+load('mod_svm.RData')
+svm_pred <- predict(mod_svm, testing)
+confusionMatrix(svm_pred, testing$classe)
+```
+
+Looking at results this is not what we expect, and probably `svm` would not be the best model selection for that problem. Again I will not proceed with testing it on whole train set.
+
+
+### Final fit would be the `Random Forests`. 
+
+For faster computing time we'll set up parallel computing using all cores but one.
+
+```{r}
+#fitting random forests
+set.seed(12344)
+fitControl <- trainControl(method = 'cv', number = 5, allowParallel = T )
+#mod_rf <- train(classe ~., data =training, method = "rf", trControl = fitControl)
+#save(mod_rf, file = 'mod_rf.RData')
+load('mod_rf.RData')
+rf_pred <- predict(mod_rf, testing)
+confusionMatrix(rf_pred, testing$classe)
+```
+
+Excellent accuracy of 0.999, it would be interesting to see which varibales contribute the most to predictions acuracy.
+
+#### Let's have a look at variables importance in our model.
+```{r, echo=F, out.width = '120%'}
+plot(varImp(mod_rf), main = 'Variables importance in RF model', cex.axis = 0.8)
+
+```
+That's interesting that 'num_window' scores that high, I was even considering deleting it before building a model.
+
+
+#### We may now test it on whole training set.
+```{r mod_rf}
+train_pred <- predict(mod_rf, train_clean)
+confusionMatrix(train_pred, train_clean$classe)
+
+# stoping cluster and deregistering cores back
+stopCluster(cluster)
+registerDoSEQ()
+```
+ Seems that `randomforests` gives the best performance as expected, even with noticably greater computing time.
+ 
+ * Accuracy = 0.9995
+ * Out of sample error ~ 0.0007 (based on validation set accuracy).
+
+
+### So we'll proceed to final stage of our project - predicting 20 cases from test set. 
+ 
+```{r}
+predict(mod_rf, test_clean)
+```
+ 
+## Part III
+ 
+### Conclusion
+ 
+ After fitting three models, I would say that having accuracy of of 0.9995 is more than enough. So either `randomforests` would suffice our purpose of predicting the quality of performed exercises, however we have to take into account the time it takes to fit a model.
+ 
+ 
+Moving forward, I found Principal Component Analysis to be a good approach to reduce dimensionality of data and still be able to fit high performing models
+ 
+ 
+#### *References*:
+ 
+1. Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+
